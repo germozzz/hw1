@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>太空射擊遊戲</title>
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 20px;
+            background: #080b18;
+            color: #eef5ff;
+            font-family: Arial, "Noto Sans TC", sans-serif;
+        }
+
+        .game {
+            width: min(100%, 480px);
+            text-align: center;
+        }
+
+        h1 {
+            margin: 0 0 12px;
+            color: #76e8ff;
+            letter-spacing: 3px;
+        }
+
+        .hud {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            color: #d7e5ff;
+            font-size: 18px;
+        }
+
+        .screen {
+            position: relative;
+            overflow: hidden;
+            border: 2px solid #76e8ff;
+            border-radius: 10px;
+            box-shadow: 0 0 24px #1aa5df55;
+            background: #050816;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-content: center;
+            gap: 12px;
+            padding: 24px;
+            background: #050816cc;
+        }
+
+        .overlay[hidden] { display: none; }
+
+        .overlay h2 {
+            margin: 0;
+            color: #76e8ff;
+            font-size: 32px;
+        }
+
+        .overlay p { margin: 0; line-height: 1.7; }
+
+        button {
+            padding: 10px 20px;
+            border: 0;
+            border-radius: 6px;
+            background: #23bce5;
+            color: #06121b;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        button:hover { background: #82eaff; }
+
+        .pause-button { margin-top: 10px; }
+
+        .help {
+            margin: 10px 0 0;
+            color: #a9b8d4;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <main class="game">
+        <h1>太空射擊</h1>
+
+        <div class="hud">
+            <span id="score">分數：0</span>
+            <span id="lives">生命：3</span>
+        </div>
+
+        <div class="screen">
+            <canvas id="game" width="480" height="640"></canvas>
+            <div class="overlay" id="overlay">
+                <h2 id="messageTitle">準備出發！</h2>
+                <p id="messageText">駕駛飛船擊落敵人，盡量取得高分。</p>
+                <button id="startButton">開始遊戲</button>
+            </div>
+        </div>
+
+        <button class="pause-button" id="pauseButton">暫停（P）</button>
+        <p class="help">移動：方向鍵或 WASD　射擊：空白鍵　暫停：P</p>
+    </main>
+
+    <script>
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+        const scoreElement = document.getElementById("score");
+        const livesElement = document.getElementById("lives");
+        const overlay = document.getElementById("overlay");
+        const messageTitle = document.getElementById("messageTitle");
+        const messageText = document.getElementById("messageText");
+        const startButton = document.getElementById("startButton");
+        const pauseButton = document.getElementById("pauseButton");
+
+        const WIDTH = canvas.width;
+        const HEIGHT = canvas.height;
+        const keys = new Set();
+
+        let state = "ready";
+        let score = 0;
+        let lives = 3;
+        let player;
+        let bullets = [];
+        let powerUps = [];
+        let enemies = [];
+        let particles = [];
+        let stars = [];
+        let spawnTimer = 0;
+        let shotTimer = 0;
+        let invulnerableTimer = 0;
+        let weapon = "normal";
+        let weaponTimer = 0;
+        let lastTime = 0;
+        let audioContext;
+
+        function makeStars() {
+            stars = Array.from({ length: 90 }, () => ({
+                x: Math.random() * WIDTH,
+                y: Math.random() * HEIGHT,
+                size: Math.random() * 2 + 0.5,
+                speed: Math.random() * 45 + 20
+            }));
+        }
+
+        function showOverlay(title, text, buttonText) {
+            messageTitle.textContent = title;
+            messageText.textContent = text;
+            startButton.textContent = buttonText;
+            overlay.hidden = false;
+        }
+
+        function playTone(frequency, duration, type = "square", volume = 0.04, endFrequency = frequency) {
+            if (!audioContext) return;
+
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            const now = audioContext.currentTime;
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(frequency, now);
+            oscillator.frequency.exponentialRampToValueAtTime(
+                Math.max(1, endFrequency),
+                now + duration
+            );
+
+            gain.gain.setValueAtTime(volume, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+            oscillator.connect(gain);
+            gain.connect(audioContext.destination);
+            oscillator.start(now);
+            oscillator.stop(now + duration);
+        }
+
+        function startGame() {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!audioContext && AudioContextClass) audioContext = new AudioContextClass();
+            if (audioContext && audioContext.state === "suspended") audioContext.resume();
+
+            score = 0;
+            lives = 3;
+            bullets = [];
+            powerUps = [];
+            enemies = [];
+            particles = [];
+            spawnTimer = 2.5;
+            shotTimer = 0;
+            invulnerableTimer = 0;
+            weapon = "normal";
+            weaponTimer = 0;
+
+            player = { x: WIDTH / 2, y: HEIGHT - 70, width: 34, height: 36, speed: 300 };
+            state = "playing";
+            keys.clear();
+            overlay.hidden = true;
+            pauseButton.textContent = "暫停（P）";
+            updateHud();
+            playTone(440, 0.15, "sine", 0.05, 880);
+        }
+
+        function togglePause() {
+            if (state === "playing") {
+                state = "paused";
+                keys.clear();
+                showOverlay("遊戲暫停", "按 P 或下方按鈕繼續。", "繼續遊戲");
+                pauseButton.textContent = "繼續（P）";
+            } else if (state === "paused") {
+                state = "playing";
+                overlay.hidden = true;
+                pauseButton.textContent = "暫停（P）";
+            }
+        }
+
+        function updateHud() {
+            scoreElement.textContent = `分數：${score}`;
+            livesElement.textContent = `生命：${lives}`;
+        }
+
+        function addExplosion(x, y, color) {
+            for (let i = 0; i < 12; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 150 + 40;
+                particles.push({
+                    x,
+                    y,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    life: 0.45 + Math.random() * 0.35,
+                    color
+                });
+            }
+        }
+
+        function createEnemy() {
+            const size = 28 + Math.random() * 12;
+            enemies.push({
+                x: Math.random() * (WIDTH - size) + size / 2,
+                y: -size,
+                size,
+                speed: 90 + Math.random() * 50 + score * 0.15,
+                phase: Math.random() * Math.PI * 2
+            });
+        }
+
+        function hitPlayer() {
+            if (invulnerableTimer > 0) return;
+
+            lives--;
+            invulnerableTimer = 1.2;
+            updateHud();
+            playTone(220, 0.35, "sawtooth", 0.08, 70);
+            addExplosion(player.x, player.y, "#ff6688");
+
+            if (lives <= 0) {
+                state = "over";
+                keys.clear();
+                showOverlay("遊戲結束", `最終分數：${score}`, "再玩一次");
+                pauseButton.textContent = "暫停（P）";
+            }
+        }
+
+        function overlaps(a, b) {
+            return Math.abs(a.x - b.x) < (a.width + b.width) / 2 &&
+                   Math.abs(a.y - b.y) < (a.height + b.height) / 2;
+        }
+
+        function update(delta) {
+            for (const star of stars) {
+                star.y += star.speed * delta;
+                if (star.y > HEIGHT) {
+                    star.y = 0;
+                    star.x = Math.random() * WIDTH;
+                }
+            }
+
+            if (state !== "playing") return;
+
+            const dx = (keys.has("ArrowRight") || keys.has("d") ? 1 : 0) -
+                       (keys.has("ArrowLeft") || keys.has("a") ? 1 : 0);
+            const dy = (keys.has("ArrowDown") || keys.has("s") ? 1 : 0) -
+                       (keys.has("ArrowUp") || keys.has("w") ? 1 : 0);
+
+            player.x = Math.max(player.width / 2, Math.min(WIDTH - player.width / 2, player.x + dx * player.speed * delta));
+            player.y = Math.max(player.height / 2, Math.min(HEIGHT - player.height / 2, player.y + dy * player.speed * delta));
+
+            shotTimer -= delta;
+            if (keys.has(" ") && shotTimer <= 0) {
+                if (weapon === "cannon") {
+                    bullets.push({ x: player.x, y: player.y - 24, width: 14, height: 28, speed: 430 });
+                } else if (weapon === "triple") {
+                    for (const offset of [-12, 0, 12]) {
+                        bullets.push({ x: player.x + offset, y: player.y - 22, width: 5, height: 16, speed: 520 });
+                    }
+                } else if (weapon === "fan") {
+                    for (const offset of [-24, -12, 0, 12, 24]) {
+                        bullets.push({ x: player.x + offset, y: player.y - 22, width: 5, height: 16, speed: 520 });
+                    }
+                } else {
+                    bullets.push({ x: player.x, y: player.y - 22, width: 5, height: 16, speed: 520 });
+                }
+                shotTimer = weapon === "cannon" ? 0.32 : weapon === "rapid" ? 0.09 : 0.18;
+                playTone(720, 0.07, "square", 0.025, 320);
+            }
+
+            for (const bullet of bullets) bullet.y -= bullet.speed * delta;
+            bullets = bullets.filter(bullet => bullet.y > -20);
+
+            for (const powerUp of powerUps) {
+                powerUp.y += powerUp.speed * delta;
+                if (overlaps(player, { x: powerUp.x, y: powerUp.y, width: 24, height: 24 })) {
+                    weapon = powerUp.type;
+                    weaponTimer = 10;
+                    powerUp.remove = true;
+                    playTone(520, 0.2, "sine", 0.05, 900);
+                } else if (powerUp.y > HEIGHT + 20) {
+                    powerUp.remove = true;
+                }
+            }
+            powerUps = powerUps.filter(powerUp => !powerUp.remove);
+            if (weaponTimer > 0 && (weaponTimer -= delta) <= 0) weapon = "normal";
+
+            spawnTimer -= delta;
+            if (spawnTimer <= 0) {
+                createEnemy();
+                // Fewer enemies at the start, with their spawn rate increasing as score rises.
+                spawnTimer = Math.max(0.5, 2.5 - score * 0.004);
+            }
+
+            for (const enemy of enemies) {
+                enemy.y += enemy.speed * delta;
+                enemy.x += Math.sin(enemy.y * 0.025 + enemy.phase) * 35 * delta;
+
+                if (enemy.y > HEIGHT + enemy.size) {
+                    enemy.remove = true;
+                    hitPlayer();
+                } else if (overlaps(
+                    { x: player.x, y: player.y, width: player.width * 0.7, height: player.height * 0.7 },
+                    { x: enemy.x, y: enemy.y, width: enemy.size, height: enemy.size }
+                )) {
+                    enemy.remove = true;
+                    hitPlayer();
+                }
+            }
+
+            for (const bullet of bullets) {
+                for (const enemy of enemies) {
+                    if (enemy.remove) continue;
+
+                    if (overlaps(bullet, { x: enemy.x, y: enemy.y, width: enemy.size, height: enemy.size })) {
+                        bullet.remove = true;
+                        enemy.remove = true;
+                        score += 10;
+                        if (Math.random() < 0.18) {
+                            powerUps.push({
+                                x: enemy.x,
+                                y: enemy.y,
+                                speed: 100,
+                                type: ["cannon", "triple", "rapid", "fan"][Math.floor(Math.random() * 4)]
+                            });
+                        }
+                        updateHud();
+                        addExplosion(enemy.x, enemy.y, "#ffb347");
+                        playTone(180, 0.16, "triangle", 0.06, 650);
+                        break;
+                    }
+                }
+            }
+
+            bullets = bullets.filter(bullet => !bullet.remove);
+            enemies = enemies.filter(enemy => !enemy.remove);
+
+            for (const particle of particles) {
+                particle.x += particle.vx * delta;
+                particle.y += particle.vy * delta;
+                particle.life -= delta;
+            }
+            particles = particles.filter(particle => particle.life > 0);
+
+            if (invulnerableTimer > 0) invulnerableTimer -= delta;
+        }
+
+        function drawShip() {
+            if (invulnerableTimer > 0 && Math.floor(invulnerableTimer * 12) % 2 === 0) return;
+
+            ctx.save();
+            ctx.translate(player.x, player.y);
+
+            ctx.fillStyle = "#ffb347";
+            ctx.beginPath();
+            ctx.moveTo(-8, 14);
+            ctx.lineTo(0, 29 + Math.random() * 5);
+            ctx.lineTo(8, 14);
+            ctx.fill();
+
+            ctx.fillStyle = "#76e8ff";
+            ctx.beginPath();
+            ctx.moveTo(0, -20);
+            ctx.lineTo(17, 16);
+            ctx.lineTo(0, 9);
+            ctx.lineTo(-17, 16);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 5, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function draw() {
+            const background = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+            background.addColorStop(0, "#080b20");
+            background.addColorStop(1, "#11152e");
+            ctx.fillStyle = background;
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            ctx.fillStyle = "#d9eaff";
+            for (const star of stars) {
+                ctx.globalAlpha = 0.45 + star.size / 4;
+                ctx.fillRect(star.x, star.y, star.size, star.size);
+            }
+            ctx.globalAlpha = 1;
+
+            if (state === "playing" || state === "paused" || state === "over") {
+                if (player) drawShip();
+
+                ctx.fillStyle = "#7df9ff";
+                for (const bullet of bullets) {
+                    ctx.fillRect(bullet.x - bullet.width / 2, bullet.y - bullet.height / 2, bullet.width, bullet.height);
+                }
+
+                for (const powerUp of powerUps) {
+                    const powerUpColors = { cannon: "#ffb347", triple: "#b78bff", rapid: "#7df9ff", fan: "#8dff9b" };
+                    const powerUpLabels = { cannon: "C", triple: "3", rapid: "R", fan: "F" };
+                    ctx.fillStyle = powerUpColors[powerUp.type];
+                    ctx.beginPath();
+                    ctx.arc(powerUp.x, powerUp.y, 12, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = "#fff";
+                    ctx.font = "bold 14px Arial";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(powerUpLabels[powerUp.type], powerUp.x, powerUp.y);
+                }
+
+                for (const enemy of enemies) {
+                    ctx.fillStyle = "#ff526a";
+                    ctx.beginPath();
+                    ctx.moveTo(enemy.x, enemy.y - enemy.size / 2);
+                    ctx.lineTo(enemy.x + enemy.size / 2, enemy.y);
+                    ctx.lineTo(enemy.x + enemy.size / 3, enemy.y + enemy.size / 2);
+                    ctx.lineTo(enemy.x - enemy.size / 3, enemy.y + enemy.size / 2);
+                    ctx.lineTo(enemy.x - enemy.size / 2, enemy.y);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    ctx.fillStyle = "#fff";
+                    ctx.fillRect(enemy.x - 8, enemy.y - 3, 4, 4);
+                    ctx.fillRect(enemy.x + 4, enemy.y - 3, 4, 4);
+                }
+
+                for (const particle of particles) {
+                    ctx.globalAlpha = Math.max(0, particle.life);
+                    ctx.fillStyle = particle.color;
+                    ctx.fillRect(particle.x, particle.y, 4, 4);
+                }
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        function loop(time = 0) {
+            const delta = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+            update(delta);
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        startButton.addEventListener("click", () => {
+            if (state === "paused") togglePause();
+            else startGame();
+        });
+
+        pauseButton.addEventListener("click", togglePause);
+
+        document.addEventListener("keydown", event => {
+            const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+
+            if (event.code === "Space") {
+                event.preventDefault();
+                keys.add(" ");
+            } else {
+                keys.add(key);
+            }
+
+            if (key === "p" && !event.repeat) togglePause();
+        });
+
+        document.addEventListener("keyup", event => {
+            const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+            keys.delete(event.code === "Space" ? " " : key);
+        });
+
+        window.addEventListener("blur", () => keys.clear());
+
+        makeStars();
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
+

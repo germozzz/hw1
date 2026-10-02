@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>俄羅斯方塊</title>
+    <style>
+        body {
+            margin: 0;
+            background: #202030;
+            color: white;
+            text-align: center;
+            font-family: Arial, sans-serif;
+        }
+
+        h1 { margin-bottom: 8px; }
+
+        canvas {
+            background: #111;
+            border: 3px solid #fff;
+            width: 300px;
+            height: 600px;
+        }
+
+        button {
+            padding: 10px 18px;
+            margin: 8px;
+            cursor: pointer;
+        }
+
+        #score {
+            font-size: 20px;
+            margin: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>俄羅斯方塊</h1>
+    <div id="score">分數：0</div>
+    <canvas id="game" width="300" height="600"></canvas>
+    <br>
+    <button onclick="startGame()">開始遊戲</button>
+    <p>← → 移動 ↓ 加速 ↑ 旋轉 空白鍵直接落下 P 暫停</p>
+
+    <script>
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+        const COLS = 10;
+        const ROWS = 20;
+        const SIZE = 30;
+
+        ctx.scale(SIZE, SIZE);
+
+        const colors = [
+            null, "#00e5ff", "#2962ff", "#ff9800",
+            "#ffeb3b", "#00e676", "#9c27b0", "#f44336"
+        ];
+
+        const shapes = [
+            [[1, 1, 1, 1]],
+            [[2, 0, 0], [2, 2, 2]],
+            [[0, 0, 3], [3, 3, 3]],
+            [[4, 4], [4, 4]],
+            [[0, 5, 5], [5, 5, 0]],
+            [[0, 6, 0], [6, 6, 6]],
+            [[7, 7, 0], [0, 7, 7]]
+        ];
+
+        let board;
+        let player;
+        let score = 0;
+        let dropCounter = 0;
+        let lastTime = 0;
+        let dropInterval = 700;
+        let playing = false;
+        let paused = false;
+        let audioContext;
+
+        // BGM 相關變數與樂譜 (經典 Korobeiniki 主題曲)
+        let bgmTimeout = null;
+        let bgmIndex = 0;
+        const bgmNotes = [
+            [659.25, 0.4], [493.88, 0.2], [523.25, 0.2], [587.33, 0.4], [523.25, 0.2], [493.88, 0.2],
+            [440.00, 0.4], [440.00, 0.2], [523.25, 0.2], [659.25, 0.4], [587.33, 0.2], [523.25, 0.2],
+            [493.88, 0.6], [523.25, 0.2], [587.33, 0.4], [659.25, 0.4],
+            [523.25, 0.4], [440.00, 0.4], [440.00, 0.4], [0, 0.2],
+            [587.33, 0.4], [698.46, 0.2], [880.00, 0.4], [783.99, 0.2], [698.46, 0.2],
+            [659.25, 0.6], [523.25, 0.2], [659.25, 0.4], [587.33, 0.2], [523.25, 0.2],
+            [493.88, 0.4], [493.88, 0.2], [523.25, 0.2], [587.33, 0.4], [659.25, 0.4],
+            [523.25, 0.4], [440.00, 0.4], [440.00, 0.4], [0, 0.2]
+        ];
+
+        function playBgmStep() {
+            if (!playing || paused) return;
+
+            const [freq, dur] = bgmNotes[bgmIndex];
+            if (freq > 0 && audioContext) {
+                const osc = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                osc.type = "triangle"; // 柔和的晶片聲
+                osc.frequency.value = freq;
+                
+                const now = audioContext.currentTime;
+                gain.gain.setValueAtTime(0.04, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + dur * 0.95);
+
+                osc.connect(gain);
+                gain.connect(audioContext.destination);
+
+                osc.start(now);
+                osc.stop(now + dur * 0.95);
+            }
+
+            bgmIndex = (bgmIndex + 1) % bgmNotes.length;
+            bgmTimeout = setTimeout(playBgmStep, dur * 650);
+        }
+
+        function stopBGM() {
+            if (bgmTimeout) {
+                clearTimeout(bgmTimeout);
+                bgmTimeout = null;
+            }
+        }
+
+        function resumeBGM() {
+            stopBGM();
+            playBgmStep();
+        }
+
+        function createBoard() {
+            return Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+        }
+
+        function randomPiece() {
+            const shape = shapes[Math.floor(Math.random() * shapes.length)];
+            return {
+                matrix: shape.map(row => row.slice()),
+                pos: { x: Math.floor(COLS / 2) - 1, y: 0 }
+            };
+        }
+
+        function drawBlock(x, y, color) {
+            ctx.fillStyle = colors[color];
+            ctx.fillRect(x, y, 1, 1);
+            ctx.strokeStyle = "#222";
+            ctx.lineWidth = 0.06;
+            ctx.strokeRect(x, y, 1, 1);
+        }
+
+        function drawMatrix(matrix, offset) {
+            matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value) drawBlock(x + offset.x, y + offset.y, value);
+                });
+            });
+        }
+
+        function draw() {
+            ctx.fillStyle = "#111";
+            ctx.fillRect(0, 0, COLS, ROWS);
+            drawMatrix(board, { x: 0, y: 0 });
+            drawMatrix(player.matrix, player.pos);
+        }
+
+        function collide() {
+            const matrix = player.matrix;
+            const pos = player.pos;
+
+            for (let y = 0; y < matrix.length; y++) {
+                for (let x = 0; x < matrix[y].length; x++) {
+                    if (
+                        matrix[y][x] &&
+                        (board[y + pos.y] &&
+                         board[y + pos.y][x + pos.x]) !== 0
+                    ) return true;
+                }
+            }
+            return false;
+        }
+
+        function merge() {
+            player.matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value) board[y + player.pos.y][x + player.pos.x] = value;
+                });
+            });
+        }
+
+                function rotate(matrix, direction) {
+            const rows = matrix.length;
+            const cols = matrix[0].length;
+            const rotated = Array.from(
+                { length: cols },
+                () => Array(rows).fill(0)
+            );
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (direction > 0) {
+                        rotated[x][rows - 1 - y] = matrix[y][x];
+                    } else {
+                        rotated[cols - 1 - x][y] = matrix[y][x];
+                    }
+                }
+            }
+
+            matrix.length = 0;
+            matrix.push(...rotated);
+        }
+
+        function playerRotate(direction) {
+            const oldX = player.pos.x;
+            let offset = 1;
+
+            rotate(player.matrix, direction);
+
+            while (collide()) {
+                player.pos.x += offset;
+                offset = -(offset + (offset > 0 ? 1 : -1));
+
+                if (offset > player.matrix[0].length) {
+                    rotate(player.matrix, -direction);
+                    player.pos.x = oldX;
+                    return;
+                }
+            }
+
+            playSound(520, 0.06);
+        }
+
+        function playerMove(direction) {
+            player.pos.x += direction;
+            if (collide()) player.pos.x -= direction;
+            else playSound(220, 0.04);
+        }
+
+        function playerDrop() {
+            player.pos.y++;
+
+            if (collide()) {
+                player.pos.y--;
+                merge();
+                playSound(130, 0.08);
+                playerReset();
+                clearLines();
+            }
+
+            dropCounter = 0;
+        }
+
+        function hardDrop() {
+            while (!collide()) player.pos.y++;
+            player.pos.y--;
+            merge();
+            playSound(100, 0.12);
+            playerReset();
+            clearLines();
+            dropCounter = 0;
+        }
+
+        function playerReset() {
+            player = randomPiece();
+
+            if (collide()) {
+                playing = false;
+                stopBGM();
+                playSound(80, 0.5);
+                setTimeout(() => alert("遊戲結束！分數：" + score), 50);
+            }
+        }
+
+        function clearLines() {
+            let lines = 0;
+
+            outer:
+            for (let y = board.length - 1; y >= 0; y--) {
+                for (let x = 0; x < board[y].length; x++) {
+                    if (!board[y][x]) continue outer;
+                }
+
+                board.splice(y, 1);
+                board.unshift(Array(COLS).fill(0));
+                y++;
+                lines++;
+            }
+
+            if (lines > 0) {
+                score += [0, 100, 300, 500, 800][lines];
+                dropInterval = Math.max(100, 700 - score / 10);
+                document.getElementById("score").textContent = "分數：" + score;
+                playSound(700, 0.2);
+            }
+        }
+
+        function update(time = 0) {
+            if (!playing) return;
+
+            const delta = time - lastTime;
+            lastTime = time;
+
+            if (!paused) {
+                dropCounter += delta;
+                if (dropCounter > dropInterval) playerDrop();
+                draw();
+            }
+
+            requestAnimationFrame(update);
+        }
+
+        function startGame() {
+            audioContext = audioContext || new AudioContext();
+            if (audioContext.state === "suspended") {
+                audioContext.resume();
+            }
+            board = createBoard();
+            score = 0;
+            dropInterval = 700;
+            playing = true;
+            paused = false;
+            bgmIndex = 0;
+            document.getElementById("score").textContent = "分數：0";
+            playerReset();
+            resumeBGM();
+            update();
+        }
+
+        function playSound(frequency, duration) {
+            if (!audioContext) return;
+
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+
+            oscillator.frequency.value = frequency;
+            oscillator.type = "square";
+            gain.gain.setValueAtTime(0.08, audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(
+                0.001,
+                audioContext.currentTime + duration
+            );
+
+            oscillator.connect(gain);
+            gain.connect(audioContext.destination);
+            oscillator.start();
+            oscillator.stop(audioContext.currentTime + duration);
+        }
+
+        document.addEventListener("keydown", event => {
+            if (!playing) return;
+
+            if (event.key.toLowerCase() === "p") {
+                paused = !paused;
+                if (paused) stopBGM();
+                else resumeBGM();
+                return;
+            }
+
+            if (paused) return;
+
+            if (event.key === "ArrowLeft") playerMove(-1);
+            if (event.key === "ArrowRight") playerMove(1);
+            if (event.key === "ArrowDown") playerDrop();
+            if (event.key === "ArrowUp") playerRotate(1);
+            if (event.code === "Space") hardDrop();
+        });
+    </script>
+</body>
+</html>
